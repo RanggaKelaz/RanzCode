@@ -1,0 +1,143 @@
+name: release
+run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || 'release build' }}
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  OPENCODE_CHANNEL: prod
+  LARPCODE_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download/LarpCode-Setup.exe
+
+jobs:
+  build:
+    name: build
+    if: github.repository == 'Tazmyan/LarpCode'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION must be semver-like, got '$version'" }
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "tag $env:GITHUB_REF_NAME does not match VERSION v$version"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "LARPCODE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "LARPCODE_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Fetch Electron runtime
+        run: bun run script/fetch-electron.ts
+
+      - name: Fetch Tor and curl-impersonate
+        env:
+          TOR_EXPERT_URL: ${{ vars.TOR_EXPERT_URL }}
+          TOR_EXPERT_SHA256: ${{ vars.TOR_EXPERT_SHA256 }}
+          CURL_IMPERSONATE_URL: ${{ vars.CURL_IMPERSONATE_URL }}
+          CURL_IMPERSONATE_SHA256: ${{ vars.CURL_IMPERSONATE_SHA256 }}
+        run: bun run script/fetch-installer-deps.ts
+
+      - name: Build bundled CLI
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          LARPCODE_DESKTOP_DISTRIBUTION: "1"
+        run: bun run packages/cli/script/build.ts --single --baseline --skip-install
+
+      - name: Build standalone CLI
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          LARPCODE_CLI_DISTRIBUTION: "1"
+        run: bun run packages/cli/script/build.ts --single --baseline --skip-install --outdir=dist-cli
+
+      - name: Build desktop
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+        run: bun run --cwd packages/desktop build
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "ISCC.exe not found after installing Inno Setup 6" }
+          $env:ISCC = $iscc
+          bun run script/stage-installer.ts
+
+      - name: Assemble release assets
+        run: bun run script/release-assets.ts
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/release
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: build
+    if: github.repository == 'Tazmyan/LarpCode' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist/release
+
+      - name: Verify checksums
+        working-directory: dist/release
+        run: sha256sum -c SHA256SUMS
+
+      - name: Publish draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: LarpCode ${{ needs.build.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/LarpCode-Setup.exe
+            dist/release/larpcode.exe
+            dist/release/install-cli.ps1
+            dist/release/cli.json
+            dist/release/LarpCode-${{ needs.build.outputs.version }}-source.zip
+            dist/release/update.json
+            dist/release/SHA256SUMS
