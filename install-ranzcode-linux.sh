@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RELEASE_TAG='v1.0.0'
-ARCHIVE_NAME='RanzCode-v1.0.0-linux-x64.tar.gz'
-ARCHIVE_SHA256='ef4dc6721d78d49ca962bd5397ef6a624dec70d7a08be06a0ca4e967274a8f7b'
+RELEASE_TAG='v1.0.1'
+ARCHIVE_NAME='RanzCode-v1.0.1-linux-x64.tar.gz'
+ARCHIVE_SHA256='963e48a3ce4c965bb50dc154154fe51f888af1885e7a8d2effe58db762d35182'
 RELEASE_URL="https://github.com/RanggaKelaz/RanzCode/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
 
 usage() {
@@ -98,7 +98,7 @@ version_output=$("$binary" --version 2>&1) || {
   printf '%s\n' 'Error: downloaded executable failed its version check.' >&2
   exit 1
 }
-if [[ "$version_output" != 'ranzcode v1.0.0' ]]; then
+if [[ "$version_output" != 'ranzcode v1.0.1' ]]; then
   printf 'Error: unexpected executable version: %s\n' "$version_output" >&2
   exit 1
 fi
