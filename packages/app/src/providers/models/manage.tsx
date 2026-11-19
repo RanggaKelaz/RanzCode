@@ -10,9 +10,12 @@ import { useLocal } from "@/providers/models/selection"
 import { popularProviders } from "@/providers/catalog/providers"
 import { useLanguage } from "@/runtime/i18n/language"
 import { useDialog } from "@opencode/ui/context/dialog"
-import { DialogConnectProvider } from "@/providers/connect/dialog"
+import { DialogConnectProvider, useProviderConnectController } from "@/providers/connect/dialog"
 import { decode64 } from "@/runtime/persistence/base64"
 import { consoleModelGroup, ProviderModelSections } from "@/providers/models/provider-group"
+import { DialogCustomModel } from "@/providers/models/custom-model-dialog"
+import { useProviderAccountActions } from "@/settings/providers/account-actions"
+import { showToast } from "@/shell/notifications/toast"
 import "@/settings/settings.css"
 import "@/shell/search-list.css"
 import "./manage.css"
@@ -25,9 +28,32 @@ export const DialogManageModels: Component = () => {
   const dialog = useDialog()
   const [store, setStore] = createStore<{ collapsed: Record<string, boolean> }>({ collapsed: {} })
   const directory = () => decode64(local.slug())
+  const providerConnect = useProviderConnectController()
+  const accountActions = useProviderAccountActions(directory)
 
-  const handleConnectProvider = () => {
-    void dialog.show(() => <DialogConnectProvider directory={directory()} />)
+  const handleConnectProvider = (providerID?: string) => {
+    providerConnect.select(providerID)
+    void dialog.show(() => <DialogConnectProvider directory={directory()} controller={providerConnect} />)
+  }
+
+  const handleAddCustomModel = () => {
+    void dialog.show(() => (
+      <DialogCustomModel
+        existingProviderIDs={() => local.model.list().map((item) => item.provider.id)}
+        onAdded={async (providerID, openConnect) => {
+          if (!openConnect) {
+            await accountActions.refresh()
+
+            return
+          }
+
+          const ready = await accountActions.waitForIntegration(providerID)
+
+          if (ready) handleConnectProvider(providerID)
+          else showToast({ description: language.t("settings.providers.custom.connectPending") })
+        }}
+      />
+    ))
   }
 
   const providerList = (providerID: string) => local.model.list().filter((x) => x.provider.id === providerID)
@@ -105,9 +131,14 @@ export const DialogManageModels: Component = () => {
           title={language.t("dialog.model.manage")}
           description={language.t("dialog.model.manage.description")}
         />
-        <Button variant="neutral" size="small" icon="plus" onClick={handleConnectProvider}>
-          {language.t("command.provider.connect")}
-        </Button>
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <Button variant="neutral" size="small" icon="plus" onClick={() => handleConnectProvider()}>
+            {language.t("command.provider.connect")}
+          </Button>
+          <Button variant="neutral" size="small" icon="plus" onClick={handleAddCustomModel}>
+            {language.t("settings.providers.custom.add")}
+          </Button>
+        </div>
       </DialogHeader>
       <DialogBody class="flex min-h-0 flex-1 flex-col">
         <div class="manage-models-search search-dialog-search">

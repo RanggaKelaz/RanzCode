@@ -1,5 +1,6 @@
 import path from "path"
 import fs from "fs/promises"
+import { parse } from "jsonc-parser"
 import { describe, expect, test } from "bun:test"
 import { Arbitrary, Effect, Fiber, Layer, Logger, Schema, Stream } from "effect"
 import { Config } from "@opencode/core/config"
@@ -95,6 +96,174 @@ const provider = {
 }
 
 describe("Config", () => {
+  it.live("adds custom providers without replacing existing config or provider IDs", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) => {
+        const global = path.join(tmp.path, "global")
+        const project = path.join(tmp.path, "project")
+        const file = path.join(global, "opencode.jsonc")
+        const original = `{
+  // Keep unrelated config and the user's existing 9router/Ranz provider.
+  "shell": "/bin/zsh",
+  "customSetting": { "keep": true },
+  "providers": {
+    "9router": {
+      "name": "9router/Ranz",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": { "baseURL": "https://router.example/v1" },
+      "models": { "ranz-model": { "name": "Ranz Model" } }
+    }
+  }
+}\n`
+
+        return Effect.promise(async () => {
+          await Promise.all([fs.mkdir(global, { recursive: true }), fs.mkdir(project, { recursive: true })])
+          await fs.writeFile(file, original)
+        }).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              const config = yield* Config.Service
+              const custom = {
+                name: "9Router Custom",
+                package: "@opencode/ai/providers/openai-compatible",
+                settings: { baseURL: "https://custom.example/v1" },
+                models: { "example-model": { name: "Example Model" } },
+              }
+
+              yield* config.update!({ providers: { "custom-9router": custom } })
+
+              const written = yield* Effect.promise(() => fs.readFile(file, "utf8"))
+              const parsed = parse(written)
+              expect(written).toContain("Keep unrelated config")
+              expect(parsed).toMatchObject({
+                shell: "/bin/zsh",
+                customSetting: { keep: true },
+                providers: {
+                  "9router": {
+                    name: "9router/Ranz",
+                    models: { "ranz-model": { name: "Ranz Model" } },
+                  },
+                  "custom-9router": custom,
+                },
+              })
+
+              const duplicate = yield* Effect.flip(config.update!({ providers: { "9router": custom } }))
+              expect(duplicate).toBeInstanceOf(FSUtil.FileSystemError)
+              expect(parse(yield* Effect.promise(() => fs.readFile(file, "utf8")))).toEqual(parsed)
+            }).pipe(Effect.provide(testLayer(project, global, project))),
+          ),
+        )
+      }),
+    ),
+  )
+
+  it.live("adds models to existing V1 and V2 providers without replacing defaults or API settings", () =>
+    Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
+      Effect.flatMap((tmp) => {
+        type ProviderConfig = { models: Record<string, unknown>; settings?: Record<string, unknown> }
+        type ParsedConfig = {
+          model: unknown
+          provider?: Record<string, ProviderConfig>
+          providers?: Record<string, ProviderConfig>
+        }
+        const cases: Array<{
+          name: string
+          fileName: string
+          original: string
+          model: Schema.Json
+          legacy: boolean
+        }> = [
+          {
+            name: "v1",
+            fileName: "opencode.json",
+            original: JSON.stringify({
+              model: "9router/ranz-model",
+              provider: {
+                "9router": {
+                  name: "9router/Ranz",
+                  npm: "@ai-sdk/openai-compatible",
+                  options: { apiKey: "keep-this-key", baseURL: "https://router.example/v1" },
+                  models: { "ranz-model": { name: "Ranz Model", options: { temperature: 0.2 } } },
+                },
+              },
+            }),
+            model: { name: "Added Model", options: { temperature: 0.4 } },
+            legacy: true,
+          },
+          {
+            name: "v2",
+            fileName: "opencode.jsonc",
+            original: JSON.stringify({
+              model: { providerID: "9router", modelID: "ranz-model" },
+              providers: {
+                "9router": {
+                  name: "9router/Ranz",
+                  package: "@opencode/ai/providers/openai-compatible",
+                  settings: { apiKey: "keep-this-key", baseURL: "https://router.example/v1" },
+                  models: { "ranz-model": { name: "Ranz Model", settings: { temperature: 0.2 } } },
+                },
+              },
+            }),
+            model: { name: "Added Model", settings: { temperature: 0.4 } },
+            legacy: false,
+          },
+        ]
+        return Effect.gen(function* () {
+          for (const scenario of cases) {
+            const global = path.join(tmp.path, scenario.name, "global")
+            const project = path.join(tmp.path, scenario.name, "project")
+            const file = path.join(global, scenario.fileName)
+            yield* Effect.promise(async () => {
+              await Promise.all([fs.mkdir(global, { recursive: true }), fs.mkdir(project, { recursive: true })])
+              await fs.writeFile(file, scenario.original)
+            })
+            yield* Effect.gen(function* () {
+              const config = yield* Config.Service
+              yield* config.update!({ providerModels: { "9router": { "added-model": scenario.model } } })
+
+              const written = parse(yield* Effect.promise(() => fs.readFile(file, "utf8"))) as ParsedConfig
+              expect(written.model).toEqual((parse(scenario.original) as ParsedConfig).model)
+              const providerRoot = scenario.legacy ? written.provider?.["9router"] : written.providers?.["9router"]
+              const originalRoot = scenario.legacy
+                ? (parse(scenario.original) as ParsedConfig).provider?.["9router"]
+                : (parse(scenario.original) as ParsedConfig).providers?.["9router"]
+              expect(providerRoot?.models["ranz-model"]).toEqual(originalRoot?.models["ranz-model"])
+              expect(providerRoot?.models["added-model"]).toEqual(scenario.model)
+              if (scenario.legacy) expect(written.providers).toBeUndefined()
+
+              const duplicate = yield* Effect.flip(
+                config.update!({ providerModels: { "9router": { "ranz-model": { name: "Replacement" } } } }),
+              )
+              expect(duplicate).toBeInstanceOf(FSUtil.FileSystemError)
+              expect(parse(yield* Effect.promise(() => fs.readFile(file, "utf8")))).toEqual(written)
+
+              const documents = (yield* config.entries()).filter((entry) => entry.type === "document")
+              const info = documents.findLast((entry) => entry.info.providers?.["9router"] !== undefined)?.info
+              expect(info?.providers?.["9router"]?.settings).toMatchObject({
+                apiKey: "keep-this-key",
+                baseURL: "https://router.example/v1",
+              })
+              if (scenario.legacy) {
+                expect(info?.providers?.["9router"]?.models?.["ranz-model"]?.body).toMatchObject({ temperature: 0.2 })
+              } else {
+                expect(info?.providers?.["9router"]?.models?.["ranz-model"]?.settings).toMatchObject({
+                  temperature: 0.2,
+                })
+              }
+              if (scenario.legacy) {
+                expect(info?.providers?.["9router"]?.models?.["added-model"]?.body).toMatchObject({ temperature: 0.4 })
+              } else {
+                expect(info?.providers?.["9router"]?.models?.["added-model"]?.settings).toMatchObject({
+                  temperature: 0.4,
+                })
+              }
+            }).pipe(Effect.provide(testLayer(project, global, project)))
+          }
+        })
+      }),
+    ),
+  )
+
   it.live("excludes home-level claude and agents directories when global is disabled", () =>
     Effect.acquireDisposable(Effect.promise(() => tmpdir())).pipe(
       Effect.flatMap((tmp) => {

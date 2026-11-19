@@ -16,6 +16,7 @@ import { formatServerError } from "@/runtime/server/errors"
 import { CONSOLE_INTEGRATION } from "@/providers/connect/dialog-machine"
 import { DialogConnectProvider, useProviderConnectController } from "@/providers/connect/dialog"
 import { ProviderModelIcon } from "@/providers/models/provider-group"
+import { DialogCustomModel } from "@/providers/models/custom-model-dialog"
 import { SettingsList } from "@/settings/list"
 import { activeProviderAccount, providerAccounts, type ProviderAccount } from "./accounts"
 import { AccountNameInput } from "./account-name"
@@ -202,6 +203,25 @@ export const SettingsProviders: Component<{
   })
 
   const available = createMemo(() => availableProviders(pageState(), liveAvailable()))
+
+  const addCustomModel = () =>
+    void dialog.show(() => (
+      <DialogCustomModel
+        existingProviderIDs={() => available().map((item) => item.id)}
+        onAdded={async (providerID, openConnect) => {
+          if (!openConnect) {
+            await accountActions.refresh()
+
+            return
+          }
+
+          const ready = await accountActions.waitForIntegration(providerID)
+
+          if (ready) connect(providerID)
+          else showToast({ description: language.t("settings.providers.custom.connectPending") })
+        }}
+      />
+    ))
 
   // Tells the machine which providers the server catalog lists, so a confirmed removal stops hiding a
   // provider once the server drops it and shows it again if it is later reconnected.
@@ -626,9 +646,14 @@ export const SettingsProviders: Component<{
             </For>
           </SettingsList>
 
-          <button type="button" class="settings-providers-view-all" onClick={() => connect()}>
-            {language.t("dialog.provider.viewAll")}
-          </button>
+          <div class="settings-providers-actions">
+            <button type="button" class="settings-providers-view-all" onClick={() => connect()}>
+              {language.t("dialog.provider.viewAll")}
+            </button>
+            <Button size="small" variant="neutral" icon="plus" onClick={addCustomModel}>
+              {language.t("settings.providers.custom.add")}
+            </Button>
+          </div>
         </div>
       </div>
     </>

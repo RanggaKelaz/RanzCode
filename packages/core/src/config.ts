@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util"
 import { applyEdits, modify, type ParseError, parse } from "jsonc-parser"
 import { Context, Effect, FiberMap, Layer, Option, PubSub, Ref, Schema, Semaphore, Stream } from "effect"
 import { Directory, Document, Info, type Patch, type Entry, Event } from "@opencode/schema/config"
+import { ConfigProvider } from "@opencode/schema/config/provider"
 import { Credential } from "./credential.js"
 import { Bus } from "./bus.js"
 import { Watcher } from "./filesystem/watcher.js"
@@ -16,6 +17,7 @@ import { AbsolutePath } from "./schema.js"
 import { ConfigVariable } from "./config/variable.js"
 import { ConfigNormalize } from "./config/normalize.js"
 import { ConfigDiscovery } from "./config/discovery.js"
+import { ConfigProviderV1 } from "./v1/config/provider.js"
 import { ConfigWatch } from "./config/watch.js"
 import { ConfigIntegration } from "./config/integration.js"
 import { ConfigManaged } from "./config/managed.js"
@@ -468,23 +470,135 @@ export const layer = (options?: Options) =>
 
       const update = Effect.fn("Config.update")(
         function* (patch: Patch) {
+          const current = yield* ConfigDiscovery.discover(options).pipe(Effect.flatMap(load), Effect.provide(context))
           const directory = initial.global ?? AbsolutePath.make(globalService.config)
           const candidates = ConfigDiscovery.names.map((name) => path.join(directory, name))
           const filepath =
             (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
           const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
           const updated = yield* Effect.try({
-            try: () =>
-              applyEdits(
-                text,
-                modify(text, ["shell"], patch.shell ?? undefined, {
-                  formattingOptions: { tabSize: 2, insertSpaces: true },
-                }),
-              ),
+            try: () => {
+              let result = text
+              const formattingOptions = { tabSize: 2, insertSpaces: true }
+
+              if (patch.shell !== undefined) {
+                result = applyEdits(result, modify(result, ["shell"], patch.shell ?? undefined, { formattingOptions }))
+              }
+
+              const providers = patch.providers ?? {}
+              const providerModels = patch.providerModels ?? {}
+              if (Object.keys(providers).length === 0 && Object.keys(providerModels).length === 0) return result
+
+              const configured = new Set(
+                current
+                  .flatMap((entry) => (entry.type === "document" ? Object.keys(entry.info.providers ?? {}) : []))
+                  .map((id) => id.toLowerCase()),
+              )
+              const documentConfigured = new Set(configured)
+              const errors: ParseError[] = []
+              const root = parse(result, errors, { allowTrailingComma: true })
+              const isRecord = (value: unknown): value is Record<string, unknown> =>
+                value !== null && typeof value === "object" && !Array.isArray(value)
+              if (errors.length > 0 || !isRecord(root)) {
+                throw new Error("Configuration must be a valid JSON object")
+              }
+
+              const rootProviders = root.providers
+              const legacyProviders = root.provider
+              if (rootProviders !== undefined && !isRecord(rootProviders)) {
+                throw new Error("Configuration providers must be an object")
+              }
+              if (legacyProviders !== undefined && !isRecord(legacyProviders)) {
+                throw new Error("Legacy configuration provider must be an object")
+              }
+              Object.keys(rootProviders ?? {}).forEach((id) => configured.add(id.toLowerCase()))
+              Object.keys(legacyProviders ?? {}).forEach((id) => configured.add(id.toLowerCase()))
+              const findID = (record: Record<string, unknown> | undefined, id: string) =>
+                Object.keys(record ?? {}).find((key) => key.toLowerCase() === id.toLowerCase())
+
+              for (const [id, provider] of Object.entries(providers)) {
+                if (!/^[a-z0-9][a-z0-9-]*$/u.test(id)) throw new Error(`Invalid custom provider ID: ${id}`)
+                if (configured.has(id.toLowerCase())) {
+                  throw new Error(`Provider ID already exists: ${id}`)
+                }
+
+                const validated = Schema.decodeUnknownSync(ConfigProvider.Info)(provider)
+                const encoded = Schema.encodeSync(ConfigProvider.Info)(validated)
+                result = applyEdits(result, modify(result, ["providers", id], encoded, { formattingOptions }))
+                configured.add(id.toLowerCase())
+              }
+
+              const addedModels = new Set<string>()
+              for (const [requestedID, models] of Object.entries(providerModels)) {
+                if (!documentConfigured.has(requestedID.toLowerCase())) {
+                  throw new Error(`Provider is not configured: ${requestedID}`)
+                }
+                const nativeID = findID(rootProviders, requestedID)
+                const legacyID = findID(legacyProviders, requestedID)
+                const writeLegacy = nativeID === undefined && legacyID !== undefined
+                const configuredID = current.flatMap((entry) =>
+                  entry.type === "document" ? [findID(entry.info.providers, requestedID)] : [],
+                ).find((id) => id !== undefined)
+                const targetID = writeLegacy ? legacyID : (nativeID ?? configuredID ?? requestedID)
+                const legacyProvider = legacyID === undefined ? undefined : legacyProviders?.[legacyID]
+                const nativeProvider = nativeID === undefined ? undefined : rootProviders?.[nativeID]
+                for (const candidate of [legacyProvider, nativeProvider]) {
+                  if (candidate !== undefined && !isRecord(candidate)) {
+                    throw new Error(`Configuration for provider ${requestedID} must be an object`)
+                  }
+                  const currentModels = isRecord(candidate) ? candidate.models : undefined
+                  if (currentModels !== undefined && !isRecord(currentModels)) {
+                    throw new Error(`Models for provider ${requestedID} must be an object`)
+                  }
+                }
+
+                for (const [modelID, modelConfig] of Object.entries(models)) {
+                  if (!modelID) throw new Error("Model ID must not be empty")
+                  const additionKey = `${requestedID.toLowerCase()}\u0000${modelID}`
+                  if (addedModels.has(additionKey)) {
+                    throw new Error(`Model ID already exists: ${requestedID}/${modelID}`)
+                  }
+                  for (const entry of current) {
+                    if (entry.type !== "document") continue
+                    const documentProviders = entry.info.providers ?? {}
+                    const configuredID = findID(documentProviders, requestedID)
+                    const documentModels = configuredID === undefined ? undefined : documentProviders[configuredID]?.models
+                    if (documentModels && Object.hasOwn(documentModels, modelID)) {
+                      throw new Error(`Model ID already exists: ${requestedID}/${modelID}`)
+                    }
+                  }
+                  for (const candidate of [legacyProvider, nativeProvider]) {
+                    const currentModels = isRecord(candidate) && isRecord(candidate.models) ? candidate.models : undefined
+                    if (currentModels && Object.hasOwn(currentModels, modelID)) {
+                      throw new Error(`Model ID already exists: ${requestedID}/${modelID}`)
+                    }
+                  }
+
+                  const encoded = writeLegacy
+                    ? Schema.encodeSync(ConfigProviderV1.Model)(Schema.decodeUnknownSync(ConfigProviderV1.Model)(modelConfig))
+                    : Schema.encodeSync(ConfigProvider.Info)(
+                        Schema.decodeUnknownSync(ConfigProvider.Info)({ models: { [modelID]: modelConfig } }),
+                      ).models?.[modelID]
+                  if (encoded === undefined) throw new Error(`Invalid model configuration: ${modelID}`)
+                  result = applyEdits(
+                    result,
+                    modify(
+                      result,
+                      [writeLegacy ? "provider" : "providers", targetID, "models", modelID],
+                      encoded,
+                      { formattingOptions },
+                    ),
+                  )
+                  addedModels.add(additionKey)
+                }
+              }
+
+              return result
+            },
             catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
           })
           yield* fs.writeWithDirs(filepath, updated.endsWith("\n") ? updated : `${updated}\n`)
-          yield* requestReload
+          yield* reload().pipe(Effect.provide(context))
         },
         (effect) => updateLock.withPermit(effect),
       )

@@ -93,6 +93,31 @@ describe("Config.Entry", () => {
     expect(() => Schema.decodeUnknownSync(Config.Info)({ providers: { custom: { canonical: 1 } } })).toThrow()
   })
 
+  test("round-trips custom provider patches without requiring a shell update", () => {
+    const input = {
+      providers: {
+        "custom-9router": {
+          name: "9Router",
+          package: "@opencode/ai/providers/openai-compatible",
+          settings: { baseURL: "https://api.example.com/v1" },
+          models: { "example-model": { name: "Example Model" } },
+        },
+      },
+    }
+
+    expect(Schema.encodeSync(Config.Patch)(Schema.decodeUnknownSync(Config.Patch)(input))).toEqual(input)
+    expect(Schema.encodeSync(Config.Patch)({ shell: undefined, providers: undefined })).toEqual({})
+  })
+
+  test("round-trips model additions independently from provider settings", () => {
+    const input = {
+      providerModels: { "9router": { "model-v2": { name: "Model V2", settings: { temperature: 0.4 } } } },
+    }
+
+    expect(Schema.encodeSync(Config.Patch)(Schema.decodeUnknownSync(Config.Patch)(input))).toEqual(input)
+    expect(Schema.encodeSync(Config.Patch)({ providerModels: undefined })).toEqual({})
+  })
+
   test("round-trips disabled and numeric provider HTTP timeouts", () => {
     const input = {
       providers: { custom: { settings: { timeout: 900_000, headerTimeout: 600_000, chunkTimeout: false } } },

@@ -36,6 +36,19 @@ export function useProviderAccountActions(directory: () => string | undefined) {
     ])
   }
 
+  const waitForIntegration = async (providerID: string) => {
+    const deadline = Date.now() + 5_000
+
+    while (Date.now() < deadline) {
+      await refresh()
+
+      if (integrations.list().some((integration) => integration.id === providerID)) return true
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+
+    return false
+  }
+
   // Stops polling when the caller (Settings or the connect dialog) goes away.
   const settler = createConsoleCatalogSettler({
     isLoaded: () => consoleCatalogLoaded(providers.connected()),
@@ -108,5 +121,5 @@ export function useProviderAccountActions(directory: () => string | undefined) {
       },
     )
 
-  return { refresh, activate, remove, rename }
+  return { refresh, waitForIntegration, activate, remove, rename }
 }
