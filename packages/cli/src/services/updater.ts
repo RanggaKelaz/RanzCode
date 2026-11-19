@@ -5,6 +5,7 @@ import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_LOCAL, OPENCODE_VERSION }
 import { Context, Duration, Effect, FileSystem, Layer, Option, Ref, Schema } from "effect"
 import { ChildProcess } from "effect/process"
 import { createHash } from "node:crypto"
+import { createReadStream } from "node:fs"
 import { parse, type ParseError } from "jsonc-parser"
 import path from "node:path"
 import { stripVTControlCharacters } from "node:util"
@@ -16,7 +17,7 @@ export const methods = ["curl", "npm", "pnpm", "bun", "yarn", "vp", "brew", "win
 
 // "standalone" is detected from a release build's compile-time marker instead of
 // a package manager. It is not offered as a --method value: a standalone CLI
-// always updates itself from LarpCode's release feed.
+// updates from the release source for its platform.
 export type Method = (typeof methods)[number] | "standalone"
 export type RunResult = { readonly type: "available" | "installed"; readonly version: string }
 export type CheckResult = RunResult | { readonly type: "unavailable"; readonly message: string }
@@ -68,6 +69,7 @@ const standaloneManifestUrl = (version?: string) =>
     : "https://github.com/Tazmyan/LarpCode/releases/latest/download/cli.json"
 
 const standaloneAssetKey = `${process.platform}-${process.arch}`
+const ranzcodeLatestReleaseUrl = "https://github.com/RanggaKelaz/RanzCode/releases/latest"
 
 const decodeVpPackages = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Array(Schema.Struct({ name: Schema.String }))),
@@ -89,7 +91,6 @@ const decodeStandaloneManifest = Schema.decodeUnknownOption(
     }),
   ),
 )
-
 const installNames: Record<Method, string> = {
   curl: "The LarpCode installer",
   npm: "npm",
@@ -248,11 +249,16 @@ const make = Effect.gen(function* () {
     return values.findLast((value) => value !== undefined) ?? "notify"
   })
 
-  const exec = Effect.fnUntraced(function* (command: string[], timeout: Duration.Input = "30 seconds") {
+  const exec = Effect.fnUntraced(function* (
+    command: string[],
+    timeout: Duration.Input = "30 seconds",
+    isolatedEnv?: Record<string, string>,
+  ) {
     // The prefix's npm and the package's postinstall run `node` from PATH, which may be missing or belong to another
     // Node install, so put the prefix's own node first.
-    const options =
-      command[0] === prefixNpm
+    const options = isolatedEnv
+      ? { env: isolatedEnv, extendEnv: false }
+      : command[0] === prefixNpm
         ? { env: { PATH: [npmBin, process.env.PATH].filter(Boolean).join(path.delimiter) }, extendEnv: true }
         : undefined
     return yield* appProcess
@@ -302,7 +308,10 @@ const make = Effect.gen(function* () {
     if (installedWinget) return "winget"
     if (!installedPackage || installedOwner) return
 
-    const parts = executable.toLowerCase().split(path.sep).map((part) => part.replace(/^\./, ""))
+    const parts = executable
+      .toLowerCase()
+      .split(path.sep)
+      .map((part) => part.replace(/^\./, ""))
     const checks: Array<{ method: Method; command: string[] }> = [
       { method: "npm", command: [npm, "list", "-g", "--depth=0", ...npmPrefixArgs, installedPackage] },
       { method: "pnpm", command: ["pnpm", "list", "-g", "--depth=0", installedPackage] },
@@ -446,7 +455,10 @@ const make = Effect.gen(function* () {
   })
 
   const latest = (selected?: Method) => {
-    if (standaloneDistribution) return standaloneManifest().pipe(Effect.map((data) => data.version))
+    if (standaloneDistribution) {
+      if (process.platform === "linux") return ranzcodeLinuxRelease().pipe(Effect.map((data) => data.version))
+      return standaloneManifest().pipe(Effect.map((data) => data.version))
+    }
     if (desktopDistribution) return Effect.fail(desktopUpdate())
     return (selected ? Effect.succeed(selected) : method()).pipe(
       Effect.flatMap((method) =>
@@ -477,6 +489,236 @@ const make = Effect.gen(function* () {
     Effect.acquireRelease(fs.makeTempDirectory({ directory: global.cache, prefix }), (directory) =>
       fs.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
     )
+
+  const ranzcodeFailure = (title: string, detail: string, cause?: unknown) =>
+    new UpgradeError(
+      {
+        title,
+        detail,
+        command: "https://github.com/RanggaKelaz/RanzCode/releases",
+        retry: "Check GitHub Releases and run ranzcode upgrade again.",
+      },
+      cause === undefined ? undefined : { cause },
+    )
+
+  const ranzcodeLinuxRelease = Effect.fnUntraced(function* (version?: string) {
+    const requestedVersion = version?.trim().replace(/^v/, "")
+    if (process.arch !== "x64")
+      return yield* Effect.fail(
+        ranzcodeFailure("RanzCode does not support this platform", `No Linux ${process.arch} release is published.`),
+      )
+    if (requestedVersion !== undefined && !parseReleaseVersion(requestedVersion))
+      return yield* Effect.fail(
+        ranzcodeFailure("Invalid RanzCode version", `The version ${requestedVersion} is not a valid release version.`),
+      )
+    let releasedVersion: string
+    if (requestedVersion) {
+      releasedVersion = requestedVersion
+    } else {
+      const result = yield* exec(
+        [
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "--location",
+          "--retry",
+          "3",
+          "--connect-timeout",
+          "10",
+          "--max-time",
+          "30",
+          "--output",
+          "/dev/null",
+          "--write-out",
+          "%{url_effective}",
+          ranzcodeLatestReleaseUrl,
+        ],
+        "40 seconds",
+      ).pipe(
+        Effect.mapError((cause) => ranzcodeFailure("Could not check for RanzCode updates", errorDetail(cause), cause)),
+      )
+      if (result.code !== 0)
+        return yield* Effect.fail(ranzcodeFailure("Could not check for RanzCode updates", resultDetail(result)))
+      const match = result.stdout
+        .trim()
+        .match(/^https:\/\/github\.com\/RanggaKelaz\/RanzCode\/releases\/tag\/v([^/?#]+)$/)
+      if (!match || !parseReleaseVersion(match[1]!))
+        return yield* Effect.fail(
+          ranzcodeFailure("Could not read the RanzCode release", "GitHub returned an invalid latest release URL."),
+        )
+      releasedVersion = match[1]!
+    }
+    const archiveName = `RanzCode-v${releasedVersion}-linux-x64.tar.gz`
+    const checksumName = `${archiveName}.sha256`
+    const assetBase = `https://github.com/RanggaKelaz/RanzCode/releases/download/v${releasedVersion}`
+    return {
+      version: releasedVersion,
+      archiveName,
+      archiveUrl: `${assetBase}/${archiveName}`,
+      checksumUrl: `${assetBase}/${checksumName}`,
+    }
+  })
+
+  const ranzcodeLinuxUpgrade = Effect.fnUntraced(function* (version: string) {
+    const release = yield* ranzcodeLinuxRelease(version)
+    yield* fs.makeDirectory(global.cache, { recursive: true })
+    const directory = yield* temporaryDirectory("ranzcode-update-")
+    const archive = path.join(directory, release.archiveName)
+    const download = yield* exec(
+      [
+        "curl",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--retry",
+        "3",
+        "--connect-timeout",
+        "15",
+        "--max-time",
+        "300",
+        "--output",
+        archive,
+        release.archiveUrl,
+      ],
+      "6 minutes",
+    ).pipe(
+      Effect.mapError((cause) => ranzcodeFailure("Could not download the RanzCode update", errorDetail(cause), cause)),
+    )
+    if (download.code !== 0)
+      return yield* Effect.fail(ranzcodeFailure("Could not download the RanzCode update", resultDetail(download)))
+    const checksum = yield* exec(
+      [
+        "curl",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--retry",
+        "3",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "30",
+        release.checksumUrl,
+      ],
+      "40 seconds",
+    ).pipe(
+      Effect.mapError((cause) => ranzcodeFailure("Could not verify the RanzCode update", errorDetail(cause), cause)),
+    )
+    if (checksum.code !== 0)
+      return yield* Effect.fail(ranzcodeFailure("Could not verify the RanzCode update", resultDetail(checksum)))
+    const parsedChecksum = checksum.stdout.trim().match(/^([a-f0-9]{64})(?:[ \t]+\*?([^\r\n]+))?$/i)
+    if (!parsedChecksum || (parsedChecksum[2] && path.basename(parsedChecksum[2].trim()) !== release.archiveName))
+      return yield* Effect.fail(
+        ranzcodeFailure("Could not verify the RanzCode update", "The GitHub release returned an invalid SHA-256 file."),
+      )
+    const actualChecksum = yield* Effect.tryPromise({
+      try: () =>
+        new Promise<string>((resolve, reject) => {
+          const hash = createHash("sha256")
+          createReadStream(archive)
+            .on("data", (chunk) => hash.update(chunk))
+            .on("error", reject)
+            .on("end", () => resolve(hash.digest("hex")))
+        }),
+      catch: (cause) => ranzcodeFailure("Could not verify the RanzCode update", errorDetail(cause), cause),
+    })
+    if (actualChecksum !== parsedChecksum[1]!.toLowerCase())
+      return yield* Effect.fail(
+        ranzcodeFailure(
+          "The RanzCode download did not match its checksum",
+          "The downloaded archive was incomplete or modified.",
+        ),
+      )
+    const extracted = path.join(directory, "extracted")
+    yield* fs.makeDirectory(extracted, { recursive: true })
+    const unpack = yield* exec(
+      [
+        "tar",
+        "--extract",
+        "--gzip",
+        "--file",
+        archive,
+        "--directory",
+        extracted,
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--",
+        "ranzcode",
+      ],
+      "2 minutes",
+    ).pipe(
+      Effect.mapError((cause) => ranzcodeFailure("Could not unpack the RanzCode update", errorDetail(cause), cause)),
+    )
+    if (unpack.code !== 0)
+      return yield* Effect.fail(ranzcodeFailure("Could not unpack the RanzCode update", resultDetail(unpack)))
+    const candidate = path.join(extracted, "ranzcode")
+    if (!(yield* fs.exists(candidate)))
+      return yield* Effect.fail(
+        ranzcodeFailure(
+          "Could not unpack the RanzCode update",
+          "The Linux archive did not contain an ranzcode executable.",
+        ),
+      )
+    const isolated = path.join(directory, "version-check")
+    const isolatedEnv = {
+      HOME: path.join(isolated, "home"),
+      XDG_CONFIG_HOME: path.join(isolated, "config"),
+      XDG_DATA_HOME: path.join(isolated, "data"),
+      XDG_CACHE_HOME: path.join(isolated, "cache"),
+      XDG_STATE_HOME: path.join(isolated, "state"),
+      OPENCODE_CONFIG_DIR: path.join(isolated, "config", "opencode"),
+      OPENCODE_CONFIG: "",
+      OPENCODE_CONFIG_CONTENT: "",
+      PATH: process.env.PATH ?? "",
+    }
+    yield* fs.makeDirectory(isolated, { recursive: true })
+    const versionCheck = yield* exec([candidate, "--version"], "30 seconds", isolatedEnv).pipe(
+      Effect.mapError((cause) =>
+        ranzcodeFailure("Could not verify the RanzCode executable", errorDetail(cause), cause),
+      ),
+    )
+    if (versionCheck.code !== 0 || versionCheck.stdout.trim() !== `ranzcode v${release.version}`)
+      return yield* Effect.fail(
+        ranzcodeFailure(
+          "Could not verify the RanzCode executable",
+          `Expected ranzcode v${release.version}, received ${versionCheck.stdout.trim() || resultDetail(versionCheck)}.`,
+        ),
+      )
+    const staging = yield* Effect.acquireRelease(
+      fs
+        .makeTempDirectory({ directory: path.dirname(executable), prefix: ".ranzcode-update-" })
+        .pipe(
+          Effect.mapError((cause) =>
+            ranzcodeFailure("Could not replace the RanzCode executable", errorDetail(cause), cause),
+          ),
+        ),
+      (target) => fs.remove(target, { recursive: true, force: true }).pipe(Effect.ignore),
+    )
+    const staged = path.join(staging, path.basename(executable))
+    yield* fs
+      .copyFile(candidate, staged)
+      .pipe(
+        Effect.mapError((cause) => ranzcodeFailure("Could not stage the RanzCode update", errorDetail(cause), cause)),
+      )
+    yield* fs
+      .chmod(staged, 0o755)
+      .pipe(
+        Effect.mapError((cause) =>
+          ranzcodeFailure("Could not prepare the RanzCode executable", errorDetail(cause), cause),
+        ),
+      )
+    yield* fs
+      .rename(staged, executable)
+      .pipe(
+        Effect.mapError((cause) =>
+          ranzcodeFailure("Could not replace the RanzCode executable", errorDetail(cause), cause),
+        ),
+      )
+    yield* Ref.set(installedVersion, release.version)
+  })
 
   const standaloneManifest = Effect.fnUntraced(function* (version?: string) {
     const response = yield* Effect.tryPromise({
@@ -539,6 +781,10 @@ const make = Effect.gen(function* () {
   // the GitHub release. Windows allows renaming a running image, so the old
   // file moves aside while the new one takes its place.
   const standaloneUpgrade = Effect.fnUntraced(function* (version: string) {
+    if (process.platform === "linux") {
+      yield* ranzcodeLinuxUpgrade(version)
+      return
+    }
     const manifest = yield* standaloneManifest(version)
     const asset = manifest.assets[standaloneAssetKey]
     if (!asset)
