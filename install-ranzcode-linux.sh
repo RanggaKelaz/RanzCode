@@ -94,7 +94,18 @@ if [[ ! -x "$binary" ]]; then
   printf '%s\n' 'Error: archive did not contain an executable ranzcode binary.' >&2
   exit 1
 fi
-version_output=$("$binary" --version 2>&1) || {
+version_output=$(
+  HOME="$work_dir/home" \
+  TMPDIR="$work_dir" \
+  XDG_CONFIG_HOME="$work_dir/config" \
+  XDG_DATA_HOME="$work_dir/data" \
+  XDG_CACHE_HOME="$work_dir/cache" \
+  XDG_STATE_HOME="$work_dir/state" \
+  OPENCODE_CONFIG_DIR="$work_dir/config/opencode" \
+  OPENCODE_CONFIG= \
+  OPENCODE_CONFIG_CONTENT= \
+    "$binary" --version 2>&1
+) || {
   printf '%s\n' 'Error: downloaded executable failed its version check.' >&2
   exit 1
 }
