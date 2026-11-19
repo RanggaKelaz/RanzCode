@@ -44,9 +44,9 @@ describe("global roots", () => {
     })
   })
 
-  test.skipIf(process.platform !== "win32")("standalone Windows CLI uses LarpCode's own roots", () => {
-    const appData = path.join(os.tmpdir(), "larpcode-xdg-appdata")
-    const root = path.join(appData, "ai.larpcode.desktop", "xdg")
+  test.skipIf(process.platform !== "win32")("standalone Windows CLI uses OpenCode's own roots", () => {
+    const appData = path.join(os.tmpdir(), "opencode-xdg-appdata")
+    const root = path.join(appData, "ai.opencode.desktop", "xdg")
 
     expect(
       run(
@@ -68,8 +68,8 @@ describe("global roots", () => {
     })
   })
 
-  test.skipIf(process.platform === "win32")("standalone non-Windows CLI uses LarpCode's own roots", () => {
-    const root = path.join(os.tmpdir(), "larpcode-xdg-standalone")
+  test.skipIf(process.platform === "win32")("standalone non-Windows CLI uses OpenCode's own roots", () => {
+    const root = path.join(os.tmpdir(), "opencode-xdg-standalone")
     const env = {
       XDG_DATA_HOME: path.join(root, "data"),
       XDG_CACHE_HOME: path.join(root, "cache"),
@@ -78,11 +78,11 @@ describe("global roots", () => {
     }
 
     expect(run(env, 'LARPCODE_CLI_DISTRIBUTION="1"')).toEqual({
-      data: path.join(env.XDG_DATA_HOME, "larpcode"),
-      cache: path.join(env.XDG_CACHE_HOME, "larpcode"),
-      config: path.join(env.XDG_CONFIG_HOME, "larpcode"),
-      state: path.join(env.XDG_STATE_HOME, "larpcode"),
-      tmp: path.join(os.tmpdir(), "larpcode"),
+      data: path.join(env.XDG_DATA_HOME, "opencode"),
+      cache: path.join(env.XDG_CACHE_HOME, "opencode"),
+      config: path.join(env.XDG_CONFIG_HOME, "opencode"),
+      state: path.join(env.XDG_STATE_HOME, "opencode"),
+      tmp: path.join(os.tmpdir(), "opencode"),
     })
   })
 })

@@ -33,7 +33,7 @@ const handler = Effect.fn("cli.settings")(function* (input: Runtime.Input<typeof
     cli: yield* config.get(),
     server: redactConfig(resolved) as Record<string, unknown>,
     paths: { ...global, db: databasePath(global.data) },
-    larpcode: {
+    ranzcode: {
       settings: LarpcodeSettings.resolved(),
       sources: LarpcodeSettings.sources(),
       autoJb: autoJb(global.data),
@@ -75,7 +75,7 @@ type Report = {
   cli: unknown
   server: Record<string, unknown>
   paths: Record<string, string>
-  larpcode: {
+  ranzcode: {
     settings: LarpcodeSettings.Resolved
     sources: Record<LarpcodeSettings.Key, LarpcodeSettings.Source>
     autoJb: AutoJb
@@ -86,7 +86,7 @@ type Report = {
 }
 
 function render(report: Report, cliPath: string) {
-  const lines = ["LARPCODE SETTINGS", "", `CLI SETTINGS · ${cliPath}`]
+  const lines = ["RANZCODE SETTINGS", "", `CLI SETTINGS · ${cliPath}`]
   const cli = flatten(report.cli)
   lines.push(...(cli.length === 0 ? ["  (empty)"] : cli.map(([key, value]) => row(key, value))))
   lines.push("", "SERVER CONFIG")
@@ -94,30 +94,30 @@ function render(report: Report, cliPath: string) {
   lines.push(...(server.length === 0 ? ["  (empty)"] : server.map(([key, value]) => row(key, printable(value)))))
   lines.push("", "PATHS", ...Object.entries(report.paths).map(([key, value]) => row(key, value)))
 
-  const larpcode = report.larpcode
+  const ranzcode = report.ranzcode
   lines.push(
     "",
-    "LARPCODE",
-    row("autoRotate", `${onOff(larpcode.settings.autoRotate)} (${larpcode.sources.autoRotate})`),
-    row("autoRotateMaxPerHour", String(larpcode.settings.autoRotateMaxPerHour)),
-    row("freeFallback", `${onOff(larpcode.settings.freeFallback)} (${larpcode.sources.freeFallback})`),
-    row("forceTor", `${onOff(larpcode.settings.forceTor)} (${larpcode.sources.forceTor})`),
+    "RANZCODE",
+    row("autoRotate", `${onOff(ranzcode.settings.autoRotate)} (${ranzcode.sources.autoRotate})`),
+    row("autoRotateMaxPerHour", String(ranzcode.settings.autoRotateMaxPerHour)),
+    row("freeFallback", `${onOff(ranzcode.settings.freeFallback)} (${ranzcode.sources.freeFallback})`),
+    row("forceTor", `${onOff(ranzcode.settings.forceTor)} (${ranzcode.sources.forceTor})`),
     row(
       "autoJb",
-      `${onOff(larpcode.autoJb.enabled)} · ${larpcode.autoJb.content}${
-        larpcode.autoJb.length === undefined ? "" : ` (${larpcode.autoJb.length} chars)`
+      `${onOff(ranzcode.autoJb.enabled)} · ${ranzcode.autoJb.content}${
+        ranzcode.autoJb.length === undefined ? "" : ` (${ranzcode.autoJb.length} chars)`
       }`,
     ),
-    row("settings", larpcode.settingsPath),
+    row("settings", ranzcode.settingsPath),
   )
 
   lines.push("", "DEPENDENCIES")
-  for (const dependency of larpcode.dependencies.dependencies) {
+  for (const dependency of ranzcode.dependencies.dependencies) {
     lines.push(
       row(dependency.name, dependency.installed ? `installed · ${dependency.path}` : `MISSING · ${dependency.detail}`),
     )
   }
-  lines.push(row("proxy", larpcode.dependencies.proxy.value ?? "(not set)"))
+  lines.push(row("proxy", ranzcode.dependencies.proxy.value ?? "(not set)"))
 
   lines.push("", "ENVIRONMENT", ...Object.entries(report.environment).map(([key, value]) => row(key, value)))
   return lines.join(EOL)

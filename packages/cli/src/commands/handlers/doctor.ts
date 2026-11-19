@@ -48,7 +48,7 @@ const handler = Effect.fn("cli.doctor")(function* (input: Runtime.Input<typeof C
       name: "Server",
       status: "fail",
       detail: errorMessage(server.failure),
-      hint: "Start LarpCode, or run `larpcode serve` and retry.",
+      hint: "Start RanzCode, or run `ranzcode serve` and retry.",
       critical: true,
     })
   } else {
@@ -122,7 +122,7 @@ const handler = Effect.fn("cli.doctor")(function* (input: Runtime.Input<typeof C
   })
 
   checks.push({
-    name: "LarpCode CLI",
+    name: "RanzCode CLI",
     status: "ok",
     detail: `${process.execPath} · v${OPENCODE_VERSION}`,
   })
@@ -154,7 +154,7 @@ export default Runtime.handler(Commands.commands.doctor, (input) =>
 )
 
 function render(checks: ReadonlyArray<Check>) {
-  const lines = ["LARPCODE DOCTOR", "", ...checks.map(renderCheck)]
+  const lines = ["RANZCODE DOCTOR", "", ...checks.map(renderCheck)]
   const warnings = checks.filter((check) => check.status === "warn" || check.status === "fail")
   if (warnings.length > 0) {
     lines.push("", "WARNINGS")
